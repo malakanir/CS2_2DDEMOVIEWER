@@ -63,7 +63,7 @@ const W2S = (m, x, y) => [scaledX(m, S, x) * view.s + view.ox, scaledY(m, S, y) 
 
 let map = MAPS.de_mirage, mapName = 'de_mirage';
 let tickrate = 64, ticks = { start: 0, freeze: 0, end: 0 }, cur = 0;
-let positions = [], kills = [], playing = false, speed = 1, last = 0;
+let positions = [], kills = [], playing = false, speed = 1, last = 0, acc = 0;
 let radarImg = null;
 const CT = '#5aa9ff', T = '#ffb84d';
 
@@ -132,8 +132,10 @@ function draw() {
 function loop(now) {
   if (playing) {
     const dt = (now - last) / 1000; last = now;
-    cur += Math.floor(dt * tickrate * speed);
-    if (cur >= ticks.end) { cur = ticks.end; setPlaying(false); }
+    acc += dt * tickrate * speed;
+    const adv = Math.floor(acc);
+    if (adv > 0) { cur += adv; acc -= adv; }
+    if (cur >= ticks.end) { cur = ticks.end; acc = 0; setPlaying(false); }
     draw();
   }
   requestAnimationFrame(loop);
@@ -213,7 +215,7 @@ document.getElementById('sample').onclick = () => {
       pos.push({
         tick: t, name: N[i], x: seg[0][0] + (seg[1][0] - seg[0][0]) * seg[2],
         y: seg[0][1] + (seg[1][1] - seg[0][1]) * seg[2], z: 0,
-        yaw: Math.atan2(seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]) * 180 / Math.PI,
+        yaw: Math.atan2(seg[1][1] - seg[0][1], seg[1][0] - seg[0][0]) * 180 / Math.PI,
         health: 100, side: i < 5 ? 3 : 2, isAlive: true, hasBomb: i === 5,
       });
     }
