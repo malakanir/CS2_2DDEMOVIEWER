@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CS2 2D Demo Viewer (MVP)</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #ddd; margin: 0; padding: 12px; }
+  #app { max-width: 1100px; margin: 0 auto; }
+  #bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  button, select, input { background: #222; color: #ddd; border: 1px solid #444; padding: 4px 8px; border-radius: 4px; }
+  #wrap { position: relative; width: 100%; aspect-ratio: 1; background: #0a0f0a; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #timeline { position: relative; height: 26px; background: #1a1a1a; margin-top: 8px; cursor: pointer; }
+  #elapsed { position: absolute; left: 0; top: 0; bottom: 0; background: #444; }
+  #cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: #4a9eff; }
+  .kill { position: absolute; top: 4px; width: 8px; height: 8px; border-radius: 50%; background: #e33; transform: translateX(-50%); }
+  #meta { font-size: 13px; color: #999; margin-top: 6px; }
+  #help { font-size: 12px; color: #777; margin-top: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h2>CS2 2D Demo Viewer — MVP</h2>
+  <div id="bar">
+    <button id="play">▶</button>
+    <select id="speed"><option>0.25</option><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>
+    <select id="map"></select>
+    <button id="sample">Load sample round</button>
+    <label>JSON <input type="file" id="json" accept=".json"></label>
+    <label>Radar <input type="file" id="radar" accept="image/*"></label>
+    <input id="radarUrl" placeholder="radar image URL" size="24">
+    <span id="tick"></span>
+  </div>
+  <div id="wrap"><canvas id="cv" width="1024" height="1024"></canvas></div>
+  <div id="timeline"><div id="elapsed"></div><div id="cursor"></div></div>
+  <div id="meta"></div>
+  <div id="help"></div>
+</div>
+<script>
+'use strict';
+// ---- map metadata, verbatim from akiver/cs-demo-manager
+// src/node/database/maps/default-maps.ts (CS2 entries) ----
+const MAPS = {
+  de_mirage:  { posX: -3230, posY: 1713, scale: 5,   thresholdZ: 0, radarSize: 1024 },
+  de_dust2:   { posX: -2476, posY: 3239, scale: 4.4, thresholdZ: 0, radarSize: 1024 },
+  de_inferno: { posX: -2087, posY: 3870, scale: 4.9, thresholdZ: 0, radarSize: 1024 },
+  de_nuke:    { posX: -3453, posY: 2887, scale: 7,   thresholdZ: -495, radarSize: 1024 },
+  de_overpass:{ posX: -4831, posY: 1781, scale: 5.2, thresholdZ: 0, radarSize: 1024 },
+  de_ancient: { posX: -2953, posY: 2164, scale: 5,   thresholdZ: 0, radarSize: 1024 },
+  de_anubis:  { posX: -2796, posY: 3328, scale: 5.22,thresholdZ: 0, radarSize: 1024 },
+  de_vertigo: { posX: -3168, posY: 1762, scale: 4,   thresholdZ: 11700, radarSize: 1024 },
+};
+// ---- coordinate transform, verbatim formula from
+// upstream/src/ui/maps/get-scaled-coordinate-[xy].ts ----
+const scaledX = (m, S, x) => ((x - m.posX) / m.scale) * S / m.radarSize;
+const scaledY = (m, S, y) => ((m.posY - y) / m.scale) * S / m.radarSize; // Y inverted
+
+const S = 1024;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const view = { s: 1, ox: 0, oy: 0 }; // zoom/pan
+const W2S = (m, x, y) => [scaledX(m, S, x) * view.s + view.ox, scaledY(m, S, y) * view.s + view.oy];
+
+let map = MAPS.de_mirage, mapName = 'de_mirage';
+let tickrate = 64, ticks = { start: 0, freeze: 0, end: 0 }, cur = 0;
+let positions = [], kills = [], playing = false, speed = 1, last = 0;
+let radarImg = null;
+const CT = '#5aa9ff', T = '#ffb84d';
+
+const side = p => (p.side === 3 || p.side === 'CT') ? CT : T;
+
+// nearest snapshot at or before tick, per player
+function frameAt(tick) {
+  const seen = new Map();
+  for (const p of positions) {
+    if (p.tick > tick) continue;
+    const e = seen.get(p.name);
+    if (!e || e.tick < p.tick) seen.set(p.name, p);
+  }
+  return [...seen.values()];
+}
+
+function draw() {
+  ctx.clearRect(0, 0, S, S);
+  if (radarImg) ctx.drawImage(radarImg, view.ox, view.oy, S * view.s, S * view.s);
+  else { // placeholder grid
+    ctx.fillStyle = '#0d140d'; ctx.fillRect(0, 0, S, S);
+    ctx.strokeStyle = '#1e2b1e'; ctx.lineWidth = 1;
+    for (let i = 0; i <= S; i += 64) {
+      ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, S); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(S, i); ctx.stroke();
+    }
+    ctx.fillStyle = '#3a4a3a'; ctx.font = '28px sans-serif';
+    ctx.fillText(mapName + ' — drop a radar image', 250, 512);
+  }
+  const r = 9 * view.s;
+  for (const p of frameAt(cur)) {
+    if (!p.isAlive) continue;
+    const [x, y] = W2S(map, p.x, p.y);
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = side(p); ctx.fill();
+    ctx.lineWidth = 2 * view.s; ctx.strokeStyle = '#fff'; ctx.stroke();
+    if (p.health < 100) { // health arc, cf. use-draw-players.ts:43
+      ctx.beginPath(); ctx.fillStyle = '#d7373f99';
+      ctx.arc(x, y, r - 1, -Math.PI / 2, -Math.PI / 2 - Math.PI * 2 * (p.health / 100));
+      ctx.lineTo(x, y); ctx.fill();
+    }
+    const a = -(p.yaw || 0) * Math.PI / 180; // aim dir, cf. use-draw-players.ts:54
+    ctx.beginPath(); ctx.lineWidth = 2 * view.s; ctx.strokeStyle = '#fff';
+    ctx.moveTo(x, y); ctx.lineTo(x + (r + 5 * view.s) * Math.cos(a), y + (r + 5 * view.s) * Math.sin(a)); ctx.stroke();
+    if (p.hasBomb) { ctx.fillStyle = '#ff7b00'; ctx.fillRect(x + r / 2, y - r - 12 * view.s, 10 * view.s, 10 * view.s); }
+    ctx.fillStyle = '#fff'; ctx.font = `${11 * view.s}px sans-serif`;
+    ctx.fillText(p.name, x - 18 * view.s, y + 22 * view.s);
+  }
+  // recent deaths (X marker, last ~2s)
+  for (const k of kills) {
+    if (k.tick > cur || cur - k.tick > tickrate * 2) continue;
+    const [x, y] = W2S(map, k.x, k.y);
+    ctx.strokeStyle = '#f33'; ctx.lineWidth = 3 * view.s;
+    const d = 8 * view.s;
+    ctx.beginPath();
+    ctx.moveTo(x - d, y - d); ctx.lineTo(x + d, y + d);
+    ctx.moveTo(x + d, y - d); ctx.lineTo(x - d, y + d);
+    ctx.stroke();
+  }
+  const pct = (cur - ticks.start) / Math.max(1, ticks.end - ticks.start);
+  document.getElementById('cursor').style.left = (pct * 100) + '%';
+  document.getElementById('elapsed').style.width = (pct * 100) + '%';
+  document.getElementById('tick').textContent = `tick ${cur} (${((cur - ticks.start) / tickrate).toFixed(1)}s)`;
+}
+
+function loop(now) {
+  if (playing) {
+    const dt = (now - last) / 1000; last = now;
+    cur += Math.floor(dt * tickrate * speed);
+    if (cur >= ticks.end) { cur = ticks.end; setPlaying(false); }
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+function setPlaying(v) { playing = v; document.getElementById('play').textContent = v ? '⏸' : '▶'; }
+
+// zoom to mouse + drag pan, simplified use-interactive-map-canvas
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * S / rect.width, my = (e.clientY - rect.top) * S / rect.height;
+  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const ns = Math.min(5, Math.max(0.5, view.s * f));
+  view.ox = mx - (mx - view.ox) * ns / view.s;
+  view.oy = my - (my - view.oy) * ns / view.s;
+  view.s = ns; draw();
+}, { passive: false });
+let drag = null;
+cv.addEventListener('mousedown', e => { drag = [e.clientX, e.clientY, view.ox, view.oy]; });
+addEventListener('mouseup', () => drag = null);
+addEventListener('mousemove', e => {
+  if (!drag) return;
+  const rect = cv.getBoundingClientRect(), k = S / rect.width;
+  view.ox = drag[2] + (e.clientX - drag[0]) * k;
+  view.oy = drag[3] + (e.clientY - drag[0 + 1]) * k;
+  draw();
+});
+
+const tl = document.getElementById('timeline');
+tl.addEventListener('click', e => {
+  const rect = tl.getBoundingClientRect();
+  cur = Math.floor(ticks.start + ((e.clientX - rect.left) / rect.width) * (ticks.end - ticks.start));
+  last = performance.now(); draw();
+});
+function renderKillMarkers() {
+  tl.querySelectorAll('.kill').forEach(n => n.remove());
+  for (const k of kills) {
+    const d = document.createElement('div');
+    d.className = 'kill'; d.title = `${k.killer} ▸ ${k.victim}${k.headshot ? ' (HS)' : ''} @${k.tick}`;
+    d.style.left = ((k.tick - ticks.start) / Math.max(1, ticks.end - ticks.start) * 100) + '%';
+    tl.appendChild(d);
+  }
+}
+
+function load(data) {
+  if (data.map && MAPS[data.map]) { mapName = data.map; map = MAPS[mapName]; }
+  tickrate = data.tickrate || 64;
+  const r = data.round || {};
+  ticks = { start: r.startTick ?? 0, freeze: r.freezetimeEndTick ?? 0, end: r.endOfficiallyTick ?? 0 };
+  positions = (data.positions || []).slice().sort((a, b) => a.tick - b.tick);
+  kills = data.kills || [];
+  if (!ticks.end && positions.length) ticks.end = positions[positions.length - 1].tick;
+  cur = ticks.freeze || ticks.start;
+  document.getElementById('map').value = mapName;
+  renderKillMarkers(); draw();
+  document.getElementById('meta').textContent =
+    `${mapName} | ${positions.length} snapshots | ${kills.length} kills | ${tickrate} tick`;
+}
+
+// ---- sample round (mirage, plausible world coords) ----
+document.getElementById('sample').onclick = () => {
+  const N = ['s1mple-ish', 'donk-ish', 'ZywOo-ish', 'm0NESY-ish', 'ropz-ish', 'NiKo-ish', 'shox-ish', 'flusha-ish', 'olof-ish', 'KRIMZ-ish'];
+  const paths = [
+    [[-200, 1400], [-500, 300], [-700, -200]], [[0, 1450], [-300, 200], [-600, 100]],
+    [[200, 1350], [300, -400], [500, -1200]], [[-400, 1500], [-200, -600], [700, -1400]],
+    [[100, 1300], [100, -800], [100, -1600]], [[-300, -2700], [-300, -1500], [-500, 300]],
+    [[-100, -2750], [-100, -1600], [100, -1600]], [[-500, -2650], [-400, -1200], [-600, 100]],
+    [[100, -2800], [200, -1800], [500, -1200]], [[-200, -2600], [-100, -1000], [700, -1400]],
+  ];
+  const T0 = 0, T1 = 7000, STEP = 4;
+  const pos = [];
+  for (let t = T0; t <= T1; t += STEP) {
+    const f = t / T1;
+    for (let i = 0; i < 10; i++) {
+      const [a, b, c] = paths[i];
+      const seg = f < 0.5 ? [a, b, f * 2] : [b, c, (f - 0.5) * 2];
+      pos.push({
+        tick: t, name: N[i], x: seg[0][0] + (seg[1][0] - seg[0][0]) * seg[2],
+        y: seg[0][1] + (seg[1][1] - seg[0][1]) * seg[2], z: 0,
+        yaw: Math.atan2(seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]) * 180 / Math.PI,
+        health: 100, side: i < 5 ? 3 : 2, isAlive: true, hasBomb: i === 5,
+      });
+    }
+  }
+  const K = [
+    { tick: 1500, x: -450, y: -100, killer: N[5], victim: N[0], headshot: true },
+    { tick: 2400, x: 200, y: -1000, killer: N[2], victim: N[6], headshot: false },
+    { tick: 3900, x: 500, y: -1250, killer: N[8], victim: N[3], headshot: true },
+    { tick: 5200, x: -550, y: 150, killer: N[1], victim: N[7], headshot: false },
+  ];
+  load({ map: 'de_mirage', tickrate: 64, round: { startTick: T0, freezetimeEndTick: 384, endOfficiallyTick: T1 }, positions: pos, kills: K });
+};
+
+document.getElementById('json').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { try { load(JSON.parse(rd.result)); } catch (err) { alert('Bad JSON: ' + err.message); } };
+  rd.readAsText(f);
+};
+const setRadar = src => { radarImg = new Image(); radarImg.onload = draw; radarImg.src = src; };
+document.getElementById('radar').onchange = e => {
+  const f = e.target.files[0]; if (f) setRadar(URL.createObjectURL(f));
+};
+document.getElementById('radarUrl').onchange = e => { if (e.target.value) setRadar(e.target.value); };
+document.getElementById('play').onclick = () => { last = performance.now(); setPlaying(!playing); };
+document.getElementById('speed').onchange = e => speed = Number(e.target.value);
+const mapSel = document.getElementById('map');
+for (const n of Object.keys(MAPS)) { const o = document.createElement('option'); o.value = o.textContent = n; mapSel.appendChild(o); }
+mapSel.value = mapName;
+mapSel.onchange = e => { mapName = e.target.value; map = MAPS[mapName]; draw(); };
+addEventListener('keydown', e => { if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); last = performance.now(); setPlaying(!playing); } });
+
+document.getElementById('help').textContent =
+  'JSON shape: {"map":"de_mirage","tickrate":64,"round":{"startTick":0,"freezetimeEndTick":384,"endOfficiallyTick":7000},' +
+  '"positions":[{"tick":0,"name":"p1","x":-200,"y":1400,"z":0,"yaw":0,"health":100,"side":3,"isAlive":true,"hasBomb":false}],' +
+  '"kills":[{"tick":1500,"x":-450,"y":-100,"killer":"a","victim":"b","headshot":true}]}\n' +
+  'side: 3/CT or 2/T. Radar PNG: extract from game files (csgo/resource/overviews) or any top-down image.';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

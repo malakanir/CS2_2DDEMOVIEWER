@@ -23,6 +23,18 @@ scaledX = ((xFromDemo - map.posX) / map.scale) * imageSize / map.radarSize;
 scaledY = ((map.posY - yFromDemo) / map.scale) * imageSize / map.radarSize; // Y inverted
 ```
 
+## MVP mandiri
+
+`viewer.html` — buka langsung di browser, nol dependensi:
+
+- Klik **Load sample round** → mainkan sample Mirage (10 pemain, 4 kill).
+- **JSON** → muat data sendiri (`positions`, `kills`, `round`, `tickrate`).
+- **Radar** → drop PNG radar (`csgo/resource/overviews/*.dds` → PNG).
+- Wheel = zoom, drag = pan, Space = play/pause, klik timeline = seek.
+
+Skipped: audio, drawing mode, multi-round, lower radar, grenades/infernos.
+Add when: butuh analisis taktik serius.
+
 ## Atribusi
 
 Seluruh file di `upstream/` adalah karya AkiVer dan kontributor cs-demo-manager,
