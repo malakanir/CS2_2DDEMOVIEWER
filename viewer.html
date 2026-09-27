@@ -51,6 +51,14 @@ const MAPS = {
   de_anubis:  { posX: -2796, posY: 3328, scale: 5.22,thresholdZ: 0, radarSize: 1024 },
   de_vertigo: { posX: -3168, posY: 1762, scale: 4,   thresholdZ: 11700, radarSize: 1024 },
 };
+// radar PNG: © Valve, via MurkyYT/cs2-map-icons (auto-extract depot)
+const RADAR_BASE = 'https://raw.githubusercontent.com/MurkyYT/cs2-map-icons/main/images/radars';
+const RADAR_FILES = {
+  de_mirage: 'de_mirage_radar_psd.png', de_dust2: 'de_dust2_radar_psd.png',
+  de_inferno: 'de_inferno_radar_psd.png', de_nuke: 'de_nuke_radar_psd.png',
+  de_overpass: 'de_overpass_radar_psd.png', de_ancient: 'de_ancient_radar_psd.png',
+  de_anubis: 'de_anubis_radar_psd.png', de_vertigo: 'de_vertigo_radar_psd.png',
+};
 // ---- coordinate transform, verbatim formula from
 // upstream/src/ui/maps/get-scaled-coordinate-[xy].ts ----
 const scaledX = (m, S, x) => ((x - m.posX) / m.scale) * S / m.radarSize;
@@ -235,7 +243,16 @@ document.getElementById('json').onchange = e => {
   rd.onload = () => { try { load(JSON.parse(rd.result)); } catch (err) { alert('Bad JSON: ' + err.message); } };
   rd.readAsText(f);
 };
-const setRadar = src => { radarImg = new Image(); radarImg.onload = draw; radarImg.src = src; };
+const setRadar = (src, fallback) => {
+  radarImg = new Image();
+  radarImg.onload = draw;
+  radarImg.onerror = () => { if (fallback && radarImg.src !== fallback) radarImg.src = fallback; else { radarImg = null; draw(); } };
+  radarImg.src = src;
+};
+const loadRadarFor = name => {
+  const f = RADAR_FILES[name];
+  if (f) setRadar(`${RADAR_BASE}/${f}`);
+};
 document.getElementById('radar').onchange = e => {
   const f = e.target.files[0]; if (f) setRadar(URL.createObjectURL(f));
 };
@@ -245,14 +262,15 @@ document.getElementById('speed').onchange = e => speed = Number(e.target.value);
 const mapSel = document.getElementById('map');
 for (const n of Object.keys(MAPS)) { const o = document.createElement('option'); o.value = o.textContent = n; mapSel.appendChild(o); }
 mapSel.value = mapName;
-mapSel.onchange = e => { mapName = e.target.value; map = MAPS[mapName]; draw(); };
+mapSel.onchange = e => { mapName = e.target.value; map = MAPS[mapName]; loadRadarFor(mapName); draw(); };
 addEventListener('keydown', e => { if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); last = performance.now(); setPlaying(!playing); } });
 
 document.getElementById('help').textContent =
   'JSON shape: {"map":"de_mirage","tickrate":64,"round":{"startTick":0,"freezetimeEndTick":384,"endOfficiallyTick":7000},' +
   '"positions":[{"tick":0,"name":"p1","x":-200,"y":1400,"z":0,"yaw":0,"health":100,"side":3,"isAlive":true,"hasBomb":false}],' +
   '"kills":[{"tick":1500,"x":-450,"y":-100,"killer":"a","victim":"b","headshot":true}]}\n' +
-  'side: 3/CT or 2/T. Radar PNG: extract from game files (csgo/resource/overviews) or any top-down image.';
+  'side: 3/CT or 2/T. Radar auto-load dari MurkyYT/cs2-map-icons (© Valve); bisa override via file/URL.';
+loadRadarFor(mapName);
 requestAnimationFrame(loop);
 </script>
 </body>
